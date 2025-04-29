@@ -175,3 +175,128 @@
         ))
     )
 )
+
+;; Add a new asset to the supported assets list
+(define-public (add-supported-asset (asset-symbol (string-ascii 10)))
+    (begin
+        (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+        (asserts! (not (is-supported-asset asset-symbol)) ERR-INVALID-PARAMETER)
+        (asserts! (< (len (var-get supported-assets)) u20) ERR-INVALID-PARAMETER)
+        
+        (ok (var-set supported-assets 
+            (unwrap! (as-max-len? (append (var-get supported-assets) asset-symbol) u20) 
+            ERR-INVALID-PARAMETER)))
+    )
+)
+
+(define-public (register-discount-type (discount-code (string-ascii 10)) (discount-label (string-ascii 64)) 
+               (max-value uint) (discount-rate uint) (approval-required bool))
+    (begin
+        ;; Authorization check
+        (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+        ;; Input validation
+        (asserts! (<= discount-rate u100) ERR-PRICE-OUT-OF-RANGE)
+        (asserts! (> max-value u0) ERR-INVALID-AMOUNT)
+        (asserts! (> (len discount-code) u0) ERR-INVALID-PARAMETER)
+        (asserts! (> (len discount-label) u0) ERR-INVALID-PARAMETER)
+        ;; Additional check to prevent duplicate discount codes
+        (asserts! (not (is-valid-discount-code discount-code)) ERR-INVALID-DISCOUNT)
+        
+        ;; Now it's safe to update the map
+        (ok (map-set discount-types
+            { discount-code: discount-code }
+            { discount-label: discount-label,
+              max-discount-value: max-value,
+              discount-rate: discount-rate,
+              approval-required: approval-required }
+        ))
+    )
+)
+
+(define-public (submit-discount-request (discount-code (string-ascii 10)) (discount-value uint))
+    (let (
+        (discount-details (unwrap! (get-discount-info discount-code) ERR-INVALID-DISCOUNT))
+        (client-profile (default-to 
+            {
+                total-fees-paid: u0,
+                total-refunds-received: u0,
+                latest-transaction: u0,
+                client-tier: "",
+                applied-discounts: (list ),
+                transaction-history: (list )
+            }
+            (get-client-profile tx-sender)))
+    )
+        (begin
+            ;; Input validation
+            (asserts! (is-valid-discount-code discount-code) ERR-INVALID-DISCOUNT)
+            (asserts! (<= discount-value (get max-discount-value discount-details)) ERR-INVALID-AMOUNT)
+            (asserts! (> discount-value u0) ERR-INVALID-AMOUNT)
+            
+            (ok (map-set client-profiles
+                tx-sender
+                {
+                    total-fees-paid: (get total-fees-paid client-profile),
+                    total-refunds-received: (get total-refunds-received client-profile),
+                    latest-transaction: (get latest-transaction client-profile),
+                    client-tier: (get client-tier client-profile),
+                    applied-discounts: (unwrap-panic (as-max-len? 
+                        (append (get applied-discounts client-profile)
+                            {
+                                discount-code: discount-code,
+                                discount-value: discount-value,
+                                discount-approved: (not (get approval-required discount-details))
+                            })
+                        u20)),
+                    transaction-history: (get transaction-history client-profile)
+                }
+            ))
+        )
+    )
+)
+
+;; Function to approve discount requests - properly validates client input
+(define-public (approve-discount-request (client principal) (discount-index uint))
+    (begin
+        ;; Authorization check
+        (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+        
+        ;; Validate client profile exists
+        (let (
+            (client-profile (unwrap! (get-client-profile client) ERR-PRICE-UNAVAILABLE))
+            (current-discounts (get applied-discounts client-profile))
+        )
+            ;; Validate discount index
+            (asserts! (< discount-index (len current-discounts)) ERR-INVALID-DISCOUNT)
+            
+            ;; Create new client profile with validated data
+            (let (
+                (validated-fees-paid (get total-fees-paid client-profile))
+                (validated-refunds (get total-refunds-received client-profile))
+                (validated-last-tx (get latest-transaction client-profile))
+                (validated-tier (get client-tier client-profile))
+                (validated-history (get transaction-history client-profile))
+                (updated-discounts (unwrap-panic (as-max-len? 
+                    (map update-discount-status 
+                        (list discount-index)
+                        (list u0)
+                        current-discounts
+                        (list discount-index))
+                    u20)))
+            )
+                ;; Now use validated data for the map-set operation
+                (ok (map-set client-profiles
+                    client
+                    {
+                        total-fees-paid: validated-fees-paid,
+                        total-refunds-received: validated-refunds,
+                        latest-transaction: validated-last-tx,
+                        client-tier: validated-tier,
+                        applied-discounts: updated-discounts,
+                        transaction-history: validated-history
+                    }
+                ))
+            )
+        )
+    )
+)
