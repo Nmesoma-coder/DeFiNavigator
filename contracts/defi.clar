@@ -300,3 +300,92 @@
         )
     )
 )
+
+;; Process refund function with proper validation
+(define-public (process-refund (client principal) (refund-amount uint) (refund-asset (string-ascii 10)))
+    (begin
+        ;; Authorization check first
+        (asserts! (is-eq tx-sender (var-get admin)) ERR-NOT-AUTHORIZED)
+        ;; Validate asset before any operations
+        (asserts! (is-supported-asset refund-asset) ERR-UNSUPPORTED-ASSET)
+        ;; Validate amount
+        (asserts! (> refund-amount u0) ERR-INVALID-AMOUNT)
+        
+        ;; Get and validate client profile
+        (let (
+            (client-profile (unwrap! (get-client-profile client) ERR-PRICE-UNAVAILABLE))
+            (converted-refund-amount (unwrap! (convert-asset-value refund-amount refund-asset "STX") ERR-UNSUPPORTED-ASSET))
+        )
+            ;; Validate refund amount against client's fees
+            (asserts! (<= converted-refund-amount (get total-fees-paid client-profile)) ERR-REFUND-REJECTED)
+            
+            ;; Extract and validate all client profile fields
+            (let (
+                (validated-fees-paid (get total-fees-paid client-profile))
+                (validated-refunds (get total-refunds-received client-profile))
+                (validated-last-tx (get latest-transaction client-profile))
+                (validated-tier (get client-tier client-profile))
+                (validated-discounts (get applied-discounts client-profile))
+                (validated-history (get transaction-history client-profile))
+                (new-refund-total (+ validated-refunds converted-refund-amount))
+                (validated-tx-entry {
+                    transaction-value: (- u0 converted-refund-amount),
+                    timestamp: block-height,
+                    transaction-asset: refund-asset
+                })
+                (updated-history (unwrap-panic (as-max-len? (append validated-history validated-tx-entry) u50)))
+            )
+                ;; Process STX transfer
+                (try! (stx-transfer? converted-refund-amount (var-get admin) client))
+                
+                ;; Now use validated data for the map-set operation
+                (ok (map-set client-profiles
+                    client
+                    {
+                        total-fees-paid: validated-fees-paid,
+                        total-refunds-received: new-refund-total,
+                        latest-transaction: validated-last-tx,
+                        client-tier: validated-tier, 
+                        applied-discounts: validated-discounts,
+                        transaction-history: updated-history
+                    }
+                ))
+            )
+        )
+    )
+)
+
+;; Enhanced reporting functions
+(define-read-only (generate-period-report (client principal) (period-id uint))
+    (let (
+        (client-profile (unwrap! (get-client-profile client) ERR-PRICE-UNAVAILABLE))
+    )
+        (ok {
+            total-paid: (get total-fees-paid client-profile),
+            total-refunded: (get total-refunds-received client-profile),
+            net-total: (- (get total-fees-paid client-profile) (get total-refunds-received client-profile)),
+            applied-discounts: (get applied-discounts client-profile),
+            transaction-history: (get transaction-history client-profile)
+        })
+    )
+)
+
+(define-read-only (calculate-net-obligation (client principal))
+    (let (
+        (client-profile (unwrap! (get-client-profile client) ERR-PRICE-UNAVAILABLE))
+        (total-approved-discounts (fold sum-approved-discounts
+            (get applied-discounts client-profile)
+            u0))
+    )
+        (ok (- (get total-fees-paid client-profile) total-approved-discounts))
+    )
+)
+
+;; Private helper for calculating total approved discounts
+(define-private (sum-approved-discounts 
+    (discount { discount-code: (string-ascii 10), discount-value: uint, discount-approved: bool }) 
+    (running-total uint))
+    (if (get discount-approved discount)
+        (+ running-total (get discount-value discount))
+        running-total)
+)
